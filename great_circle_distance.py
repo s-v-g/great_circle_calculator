@@ -2,6 +2,7 @@
 from math import radians, cos, sin, asin, sqrt, atan2, degrees
 import sys
 import csv
+import datetime
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtWidgets import QFileDialog, QMessageBox, QListWidgetItem
@@ -28,6 +29,21 @@ def haversine(lon1, lat1, lon2, lat2):
     # Radius of earth in kilometers is 6371
     km = 6371* c
     return abs(km)
+    
+def km_to_nmi(km):
+    """
+    Convert distance in kilometers to nautical miles
+    """
+    return km / 1.852
+    
+   
+def get_travel_time(distance, speed):
+    """
+    calculates the travel time for the provided distance.
+    Speed and distance must be in same units!
+    """
+    tt = distance / speed    
+    return str(datetime.timedelta(hours = tt)).split('.',2)[0].replace(",","")
     
 
 def convert_to_dd(pos_str):
@@ -99,7 +115,7 @@ def find_bearing(lat1, lon1, lat2, lon2):
     y = (cos(rlat1) * sin(rlat2)) - (sin(rlat1) * cos(rlat2) * cos(dlon))
     bearing = (degrees(atan2(x,y)) + 360) % 360    
     return bearing
-    
+     
 
 class GreatCircleDistanceCalculator(Ui_MainWindow):
     def __init__(self, dialog):
@@ -137,13 +153,35 @@ class GreatCircleDistanceCalculator(Ui_MainWindow):
         self.output_file = self.output_filepath_lineEdit.text()
         
     def toggle_input(self, state):
+        """
+        Toggles between which input method is to be run: from CSV file or from UI input.
+        
+        Also toggles the enabled status of the relevant input fields in the UI.
+        """
     
         self.use_csv = not self.use_fields_checkbox.isChecked()
-        self.csv_filepath_lineEdit.setReadOnly(self.use_csv)
+        self.csv_filepath_lineEdit.setEnabled(self.use_csv)
         self.load_csv_button.setEnabled(self.use_csv)
+        
+        self.latitude_input_1.setReadOnly(self.use_csv)
+        self.latitude_input_2.setReadOnly(self.use_csv)
+        self.longitude_input_1.setReadOnly(self.use_csv)
+        self.longitude_input_2.setReadOnly(self.use_csv)
+        self.speed_input.setReadOnly(self.use_csv)
+        
+        self.latitude_input_1.setEnabled(not self.use_csv)
+        self.latitude_input_2.setEnabled(not self.use_csv)
+        self.longitude_input_1.setEnabled(not self.use_csv)
+        self.longitude_input_2.setEnabled(not self.use_csv)
+        self.speed_input.setEnabled(not self.use_csv)
         
         
     def find_distance(self):
+        """
+        Finds the great circle distance, bearing, and time between points (if speed is provided),
+        for the given set of coordinates; either CSV or from UI fields.
+        """
+        
         if self.use_csv:
             if not self.csv_file:
                 self.txt.setText("No csv file specified")
@@ -170,17 +208,31 @@ class GreatCircleDistanceCalculator(Ui_MainWindow):
             self.txt.setText("Error parsing position: {}".format(err.message))
             return
             
+        try:
+            speed = float(self.speed_input.text())
+        except:
+            speed = None
+            
         
         if lat1 is None or lon1 is None or lat2 is None or lon2 is None:            
             self.txt.setText("Missing latitude or longitude field")
             return
         
         km = haversine(lon1, lat1, lon2, lat2)
-        nmi = km / 1.852
+        nmi = km_to_nmi(km)
+        
+        if speed:
+            travel_time = get_travel_time(nmi, speed)
+        else:
+            travel_time = None
         
         bearing = find_bearing(lat1, lon1, lat2, lon2)
         
-        self.txt.setText("{:.3f} km, {:.3f} nmi, bearing: {:.1f}".format(km, nmi, bearing))
+        output = f"{km:.3f} km, {nmi:.3f} nmi, bearing: {bearing:.1f}"#.format(km, nmi, bearing)
+        if travel_time:
+            output += f", {travel_time} duration"
+        
+        self.txt.setText(output)
         
         
     def run_csv_file(self):
@@ -197,8 +249,9 @@ class GreatCircleDistanceCalculator(Ui_MainWindow):
         '''
 
         with open(self.csv_file) as csvfile:
-
-            lat_idx, lon_idx = None, None
+        
+            # The index of each field in the CSV file
+            lat_idx, lon_idx, speed_idx = None, None, None
             
             reader = csv.reader(csvfile)
             headers = next(reader, None)    
@@ -207,32 +260,59 @@ class GreatCircleDistanceCalculator(Ui_MainWindow):
                 if 'lat' in headers[field_idx].lower():            
                     lat_idx = field_idx
                 elif 'lon' in headers[field_idx].lower():            
-                    lon_idx = field_idx    
+                    lon_idx = field_idx
+                elif 'speed' in headers[field_idx].lower():
+                    speed_idx = field_idx
             
+            # if we can't find lat or lon in the header, exit
             if lat_idx is None or lon_idx is None:
                 self.txt.setText("cannot find lat/lon header fields in {}".format(self.csv_file))
                 return
             
+            # read the CSV input sequentially. After the first line of coordinates has been read 
+            # we can start calculating distances between the current line and the previous.
             past_first = False
-            lats, lons, kms, nmis, bearings = [], [], [], [], []
+            lats, lons, kms, nmis, bearings, speeds, travel_times = [], [], [], [], [], [], []
             for row in reader:        
                 lats.append(convert_to_dd(row[lat_idx]))
                 lons.append(convert_to_dd(row[lon_idx]))
                 
+                if speed_idx:
+                    try:
+                        speeds.append(float(row[speed_idx]))
+                    except Exception as err:
+                        print("could not parse speed from row: {}".format(row))
+                        speeds.append(None)
+                        print(err)
+                
                 if past_first:
                     kms.append(haversine(lons[-2],lats[-2], lons[-1], lats[-1]))
                     nmis.append(kms[-1] / 1.852) #conversion from km to nautical miles
-                    bearings.append(find_bearing(lats[-2], lons[-2],lats[-1], lons[-1]))
-                    #self.txt.append("{}, {} to {}, {} --> {}km\n".format(lats[-2], lons[-2], lats[-1],lons[-1], kms[-1]))
-                    self.txt.append("{:.3f} km, {:.3f} nmi, {:.2f} deg".format(kms[-1], nmis[-1], bearings[-1]))
+                    bearings.append(find_bearing(lats[-2], lons[-2],lats[-1], lons[-1]))                    
+                    
+                    data = "{:.3f} km, {:.3f} nmi, {:.2f} deg".format(kms[-1], nmis[-1], bearings[-1])
+                    if speed_idx:
+                        if speeds[-1]:
+                            try:
+                                travel_times.append(get_travel_time(nmis[-1],speeds[-1]))
+                            except Exception as err:
+                                print(err)
+                                travel_times.append("")
+                            data += f", {travel_times[-1]}"
+                    self.txt.append(data)
                 else:
                     past_first = True
                     
         if self.output_file:
             with open(self.output_file, 'w') as outfile:
-                outfile.write("{},{},{},{},{},{},{}\n".format("latitude_1","longitude_1","latitude_2","longitude_2","distance (km)", "distance (nmi)","bearing (degrees)"))
+                output_header = "start_latitude, start_longitude, end_latitude, end_longitude, distance (km), distance (nmi), bearing (degrees)"
+                if speed_idx:
+                    output_header += ", travel time"                
                 for i in range(len(kms)):
-                    outfile.write("{},{},{},{},{:.3f},{:.3f},{:.3f}\n".format(lats[i],lons[i],lats[i+1],lons[i+1],kms[i], nmis[i], bearings[i]))
+                    output_csv_line = f"{lats[i]}, {lons[i]}, {lats[i+1], lons[i+1], {kms[i]}, {nmis[i]}, {bearings[i]}}"
+                    if speed_idx:
+                        output_csv_line += f"{travel_times[i]}"
+                    outfile.write(output_csv_line)
 
 
 
