@@ -3,15 +3,26 @@ from math import radians, cos, sin, asin, sqrt, atan2, degrees
 import sys
 import csv
 import datetime
+import pyproj
+from pyproj import _datadir, datadir
+import utm
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtWidgets import QFileDialog, QMessageBox, QListWidgetItem
 
 from distance_calc_toolGUI import Ui_MainWindow
+wgs84 = pyproj.Geod(ellps='WGS84')
 
-__version__ = 1.0
+__version__ = 1.1
 
-def haversine(lon1, lat1, lon2, lat2):
+#1.1 Update - changed to calculate distance in UTM/WGS84 projection if possible, otherwise WGS84 ellipsidal distance
+#             also added in option to include speed in Kn for travel time
+#             also added output for total distance (for CSV input) and total travel time if speed provided
+
+# 1.0 Initial version - calculate spherical earth distance (km and nmi), bearing for given coordinate pairs
+
+
+def haversine_distance(lat1, lon1, lat2, lon2):
     """
     Calculate the great circle distance between two points 
     on the earth (specified in decimal degrees)
@@ -21,14 +32,50 @@ def haversine(lon1, lat1, lon2, lat2):
     """
     # convert decimal degrees to radians    
     lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
-    # haversine formula 
+    # haversine_distance formula
     dlon = lon2 - lon1 
     dlat = lat2 - lat1 
     a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
-    c = 2 * atan2(sqrt(a),sqrt(1-a))
+    c = 2 * atan2(sqrt(a), sqrt(1-a))
     # Radius of earth in kilometers is 6371
-    km = 6371* c
+    km = 6371 * c
     return abs(km)
+
+
+def cartesian_distance(x1, y1, x2, y2):
+
+    dx = x1 - x2
+    dy = y1 - y2
+    return sqrt((dx * dx) + (dy * dy))
+
+
+def get_distance(lat1, lon1, lat2, lon2):
+    """
+    Calculates the distance between two sets of lat/lon coordinates given in decimal degrees.
+
+    :param lat1: start latitude in decimal degrees
+    :param lon1: start longitude in decimal degrees
+    :param lat2: stop latitude in decimal degrees
+    :param lon2: stop longitude in decimal degrees
+    :return: tuple containing distance in wgs85 ellipsoid, haversine great circle distance, and UTM coordinate distance
+    (if possible)
+    """
+
+    start_x, start_y, start_zone_number, start_zone_letter = utm.from_latlon(lat1, lon1)
+    end_x, end_y, end_zone_number, end_zone_letter = utm.from_latlon(lat2, lon2)
+
+    if start_zone_letter == end_zone_letter and start_zone_number == end_zone_number:
+        utm_distance = cartesian_distance(start_x, start_y, end_x, end_y)
+        utm_zone = f"{start_zone_number}{start_zone_letter}"
+    else:
+        utm_distance = None
+        utm_zone = None
+
+    hav_dist = haversine_distance(lat1, lon1, lat2, lon2)
+    wgs84_distance = wgs84.inv(lon1, lat1, lon2, lat2)[2]
+
+    return wgs84_distance, hav_dist, utm_distance, utm_zone
+
     
 def km_to_nmi(km):
     """
@@ -37,29 +84,33 @@ def km_to_nmi(km):
     return km / 1.852
     
    
-def get_travel_time(distance, speed):
+def get_travel_timedelta(distance, speed):
     """
     calculates the travel time for the provided distance.
     Speed and distance must be in same units!
     """
-    tt = distance / speed    
-    return str(datetime.timedelta(hours = tt)).split('.',2)[0].replace(",","")
+    tt = distance / speed
+    return tt
+
+
+def get_travel_time(tt):
+    return str(datetime.timedelta(hours=tt)).split('.', 2)[0].replace(",", "")
     
 
 def convert_to_dd(pos_str):
-    '''
+    """
     Converts a given latitude or longitude from DMS or DM into decimal degrees.
     Component degrees minutes and seconds need to be space separated.
-    
+
     Accepted formats:
     DMS: 41 25 01N or 120 58 57W
-    DMS: S17 33 08.352 or W69 01 29.74 
-    
+    DMS: S17 33 08.352 or W69 01 29.74
+
     DM: N41 25.117 and W120 58.292
     DM: 41 25.117N and 120 58.292W
-    
+
     returns decimal degrees as a float
-    '''
+    """
     
     if pos_str == "":
         print("Cannot convert nothing!!!")
@@ -69,14 +120,14 @@ def convert_to_dd(pos_str):
         dd = float(pos_str)
         return dd
     except ValueError:
-        #musn't be in decimal degrees...        
+        # musn't be in decimal degrees...
         pass        
         
     make_negative = False
-    #need to check to see if we need to make the position signed
+    # need to check to see if we need to make the position signed
     if any(x in pos_str.upper() for x in ['N', 'S', 'E', 'W']):        
         if any(x in pos_str.upper() for x in ['S', 'W']):            
-            #need to convert S to negative, W to negative
+            # need to convert S to negative, W to negative
             make_negative = True        
         pos_str = "{}".format(pos_str.upper().replace('N','').replace('S','').replace('E','').replace('W',''))
             
@@ -84,7 +135,7 @@ def convert_to_dd(pos_str):
     try:
         dd = float(bits[0]) + float(bits[1])/60    
         if len(bits) == 3:
-            #degrees minutes seconds        
+            # degrees minutes seconds
             dd += float(bits[2])/(60*60)
     except ValueError:
         print("Could not parse string to float: {}".format(pos_str))
@@ -96,14 +147,14 @@ def convert_to_dd(pos_str):
     
     
 def find_bearing(lat1, lon1, lat2, lon2):
-    '''
+    """
     Finds the bearing from the first set of coordinates to the second, in degrees. Ensures
     the bearing is between 0 and 360 degrees.
-    
+
     params: lats and lons need to be in decimal degrees.
-    
-    returns bearing in degrees as a float.    
-    '''
+
+    returns bearing in degrees as a float.
+    """
     
     dlon = radians(lon2 - lon1)
     
@@ -132,7 +183,7 @@ class GreatCircleDistanceCalculator(Ui_MainWindow):
         
         self.use_fields_checkbox.stateChanged.connect(self.toggle_input)
         
-        self.run_button.clicked.connect(self.find_distance)
+        self.run_button.clicked.connect(self.evaluate_positions)
         
         
     def get_csv_filepath(self):
@@ -174,9 +225,8 @@ class GreatCircleDistanceCalculator(Ui_MainWindow):
         self.longitude_input_1.setEnabled(not self.use_csv)
         self.longitude_input_2.setEnabled(not self.use_csv)
         self.speed_input.setEnabled(not self.use_csv)
-        
-        
-    def find_distance(self):
+
+    def evaluate_positions(self):
         """
         Finds the great circle distance, bearing, and time between points (if speed is provided),
         for the given set of coordinates; either CSV or from UI fields.
@@ -187,17 +237,18 @@ class GreatCircleDistanceCalculator(Ui_MainWindow):
                 self.txt.setText("No csv file specified")
             else:
                 self.txt.setText('')
-                self.run_csv_file()
+                self.run_csv_input()
         else:
-            self.run_fields()
+            self.run_GUI_input()
 
-    def run_fields(self):
-        '''
+    def run_GUI_input(self):
+        """
         Takes the positions from the manual input fields and calculates great circle distance
         in kilometers and nautical miles, as well as bearing from north in degrees.
-        
+
         Note: only outputs to GUI, not to CSV.
-        '''
+        """
+        self.txt.setText("") # clear the display
     
         try:
             lat1 = convert_to_dd(self.latitude_input_1.text())
@@ -212,44 +263,30 @@ class GreatCircleDistanceCalculator(Ui_MainWindow):
             speed = float(self.speed_input.text())
         except:
             speed = None
-            
         
-        if lat1 is None or lon1 is None or lat2 is None or lon2 is None:            
+        if lat1 is None or lon1 is None or lat2 is None or lon2 is None:
             self.txt.setText("Missing latitude or longitude field")
             return
-        
-        km = haversine(lon1, lat1, lon2, lat2)
-        nmi = km_to_nmi(km)
-        
-        if speed:
-            travel_time = get_travel_time(nmi, speed)
-        else:
-            travel_time = None
-        
-        bearing = find_bearing(lat1, lon1, lat2, lon2)
-        
-        output = f"{km:.3f} km, {nmi:.3f} nmi, bearing: {bearing:.1f}"#.format(km, nmi, bearing)
+
+        distance, nmi, bearing, system, error, travel_time = self.process(lat1, lon1, lat2, lon2, speed)
+
         if travel_time:
-            output += f", {travel_time} duration"
+            self.txt.append(f"\n{get_travel_time(travel_time)} duration")
         
-        self.txt.setText(output)
-        
-        
-    def run_csv_file(self):
-        '''
+    def run_csv_input(self):
+        """
         Reads a given CSV file of sequential locations, and calculates great circle
         distance between the proceeding points. It is assumed that the locations
         provided are the sequence in which to calculate distances.
-        
+
         The fields for latitude and longitude are determined by searching the header
         for fields containing 'lat' and 'lon', and is case insensitive for the search.
-        
-        The distances and bearings are output to the GUI, and optionally output to 
-        CSV as well, if a filename is provided.
-        '''
 
+        The distances and bearings are output to the GUI, and optionally output to
+        CSV as well, if a filename is provided.
+        """
+        self.txt.setText("") # clear the display
         with open(self.csv_file) as csvfile:
-        
             # The index of each field in the CSV file
             lat_idx, lon_idx, speed_idx = None, None, None
             
@@ -272,7 +309,8 @@ class GreatCircleDistanceCalculator(Ui_MainWindow):
             # read the CSV input sequentially. After the first line of coordinates has been read 
             # we can start calculating distances between the current line and the previous.
             past_first = False
-            lats, lons, kms, nmis, bearings, speeds, travel_times = [], [], [], [], [], [], []
+            # all of our lists for storing information...
+            lats, lons, ms, nmis, bearings, speeds, travel_times, types, errors = [], [], [], [], [], [], [], [], []
             for row in reader:        
                 lats.append(convert_to_dd(row[lat_idx]))
                 lons.append(convert_to_dd(row[lon_idx]))
@@ -286,41 +324,76 @@ class GreatCircleDistanceCalculator(Ui_MainWindow):
                         print(err)
                 
                 if past_first:
-                    kms.append(haversine(lons[-2],lats[-2], lons[-1], lats[-1]))
-                    nmis.append(kms[-1] / 1.852) #conversion from km to nautical miles
-                    bearings.append(find_bearing(lats[-2], lons[-2],lats[-1], lons[-1]))                    
-                    
-                    data = "{:.3f} km, {:.3f} nmi, {:.2f} deg".format(kms[-1], nmis[-1], bearings[-1])
+                    start_lat, start_lon, stop_lat, stop_lon = lats[-2], lons[-2], lats[-1], lons[-1]
                     if speed_idx:
-                        if speeds[-1]:
-                            try:
-                                travel_times.append(get_travel_time(nmis[-1],speeds[-1]))
-                            except Exception as err:
-                                print(err)
-                                travel_times.append("")
-                            data += f", {travel_times[-1]}"
-                    self.txt.append(data)
+                        speed = speeds[-1]
+                    else:
+                        speed = None
+                    distance, nmi, bearing, system, error, travel_time = self.process(start_lat, start_lon, stop_lat, stop_lon, speed)
+                    ms.append(distance)
+                    nmis.append(nmi)
+                    bearings.append(bearings)
+                    types.append(system)
+                    travel_times.append(travel_time)
+                    errors.append(error)
                 else:
                     past_first = True
+
+        self.txt.append(f"\nTotal distance: {sum(nmis):.3f} nmi")
+        if travel_times:
+            self.txt.append(f"Total travel time: {get_travel_time(sum(travel_times))}")
                     
         if self.output_file:
             with open(self.output_file, 'w') as outfile:
-                output_header = "start_latitude, start_longitude, end_latitude, end_longitude, distance (km), distance (nmi), bearing (degrees)"
+                output_header = "start_latitude, start_longitude, end_latitude, end_longitude, type, distance (m), distance (nmi), bearing (degrees)"
                 if speed_idx:
-                    output_header += ", travel time"                
-                for i in range(len(kms)):
-                    output_csv_line = f"{lats[i]}, {lons[i]}, {lats[i+1], lons[i+1], {kms[i]}, {nmis[i]}, {bearings[i]}}"
+                    output_header += ", travel time"
+                outfile.write(output_header + "\n")
+                for i in range(len(ms)):
+                    output_csv_line = f"{lats[i]}, {lons[i]}, {lats[i+1]}, {lons[i+1]}, {types[i]}, {ms[i]:.1f}, {nmis[i]:.3f}, {bearings[i]:.2f}"
                     if speed_idx:
-                        output_csv_line += f"{travel_times[i]}"
-                    outfile.write(output_csv_line)
+                        output_csv_line += f", {get_travel_time(travel_times[i])}"
 
+                    outfile.write(output_csv_line + "\n")
 
+    def process(self, start_lat, start_lon, stop_lat, stop_lon, speed=None):
+        wgs84_dist, hav_dist, utm_dist, utm_zone = get_distance(start_lat, start_lon, stop_lat, stop_lon)
+
+        if utm_dist:
+            distance = utm_dist
+            system = f"UTM-{utm_zone}"
+            error = float(int(utm_dist - wgs84_dist))
+        else:
+            distance = wgs84_dist
+            system = "WGS84"
+            error = None
+
+        nmi = km_to_nmi(distance / 1000)  # conversion from km to nautical miles
+        bearing = find_bearing(start_lat, start_lon, stop_lat, stop_lon)
+
+        display_line = f"{distance:.1f} km, {nmi:.3f} nmi, {system}, {bearing:.2f} deg"
+
+        if speed:
+            try:
+                travel_time = get_travel_timedelta(nmi, speed)
+            except Exception as err:
+                print(err)
+                travel_time = None
+            display_line += f", {get_travel_time(travel_time)}"
+        else:
+            travel_time = None
+        if error:
+            error_percent = abs(error / utm_dist) * 100
+            display_line += f", difference to WGS84: {error} m : {error_percent:.4f}%"
+        self.txt.append(display_line)
+
+        return distance, nmi, bearing, system, error, travel_time
 
 
 if __name__ == '__main__':
     app = QtWidgets.QApplication(sys.argv)
     dialog = QtWidgets.QMainWindow()
-    dialog.setWindowTitle("Distanace calculator tool v{}".format(__version__))
+    dialog.setWindowTitle("Distance calculator tool v{}".format(__version__))
     prog = GreatCircleDistanceCalculator(dialog) 
     dialog.show()
     sys.exit(app.exec_())
